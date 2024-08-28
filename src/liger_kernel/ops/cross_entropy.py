@@ -3,13 +3,16 @@ import triton
 import triton.language as tl
 
 
+def get_configs():
+    configs = []
+    for block_size in [4096, 8192, 16384, 32768]:
+        for num_warps in [8, 16, 32, 64]:
+            if num_warps <= block_size // 32:  # Ensure num_warps doesn't exceed maximum allowed
+                configs.append(triton.Config({'BLOCK_SIZE': block_size}, num_warps=num_warps))
+    return configs
+
 @triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE': 4096}, num_warps=[8, 16, 32, 64]),
-        triton.Config({'BLOCK_SIZE': 8192}, num_warps=[8, 16, 32, 64]),
-        triton.Config({'BLOCK_SIZE': 16384}, num_warps=[8, 16, 32, 64]),
-        triton.Config({'BLOCK_SIZE': 32768}, num_warps=[8, 16, 32, 64]),
-    ],
+    configs=get_configs(),
     key=['n_cols']
 )
 @triton.jit
@@ -121,12 +124,7 @@ MAX_FUSED_SIZE = 65536 // 2  # the best size we found by manually tuning
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_EM': 4096}, num_warps=[8, 16, 32, 64]),
-        triton.Config({'BLOCK_SIZE_EM': 8192}, num_warps=[8, 16, 32, 64]),
-        triton.Config({'BLOCK_SIZE_EM': 16384}, num_warps=[8, 16, 32, 64]),
-        triton.Config({'BLOCK_SIZE_EM': 32768}, num_warps=[8, 16, 32, 64]),
-    ],
+    get_configs(),
     key=['n_cols']
 )
 @triton.jit
@@ -135,7 +133,7 @@ def element_mul(
     X_stride,
     grad_output_ptr,
     n_cols,
-    BLOCK_SIZE_EM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
 ):
     """
     This function multiplies each element of the tensor pointed by X_ptr with the value pointed by grad_output_ptr.
@@ -146,7 +144,7 @@ def element_mul(
     X_stride (int): The stride of the input tensor.
     grad_output_ptr: Pointer to the gradient output value.
     n_cols (int): The number of columns in the input tensor.
-    BLOCK_SIZE_EM (int): The block size for Triton operations.
+    BLOCK_SIZE (int): The block size for Triton operations.
     """
 
     # Get the program ID and convert it to int64 to avoid overflow
@@ -159,8 +157,8 @@ def element_mul(
     grad_output = tl.load(grad_output_ptr)
 
     # Perform the element-wise multiplication
-    for i in range(0, n_cols, BLOCK_SIZE_EM):
-        X_offsets = i + tl.arange(0, BLOCK_SIZE_EM)
+    for i in range(0, n_cols, BLOCK_SIZE):
+        X_offsets = i + tl.arange(0, BLOCK_SIZE)
         X_block = tl.load(X_ptr + X_offsets, mask=X_offsets < n_cols)
         tl.store(X_ptr + X_offsets, X_block * grad_output, mask=X_offsets < n_cols)
 
