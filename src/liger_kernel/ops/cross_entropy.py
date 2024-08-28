@@ -3,6 +3,15 @@ import triton
 import triton.language as tl
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE': 4096}, num_warps=[8, 16, 32, 64]),
+        triton.Config({'BLOCK_SIZE': 8192}, num_warps=[8, 16, 32, 64]),
+        triton.Config({'BLOCK_SIZE': 16384}, num_warps=[8, 16, 32, 64]),
+        triton.Config({'BLOCK_SIZE': 32768}, num_warps=[8, 16, 32, 64]),
+    ],
+    key=['n_cols']
+)
 @triton.jit
 def liger_cross_entropy_kernel(
     X_ptr,
@@ -111,6 +120,15 @@ def liger_cross_entropy_kernel(
 MAX_FUSED_SIZE = 65536 // 2  # the best size we found by manually tuning
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE': 4096}, num_warps=[8, 16, 32, 64]),
+        triton.Config({'BLOCK_SIZE': 8192}, num_warps=[8, 16, 32, 64]),
+        triton.Config({'BLOCK_SIZE': 16384}, num_warps=[8, 16, 32, 64]),
+        triton.Config({'BLOCK_SIZE': 32768}, num_warps=[8, 16, 32, 64]),
+    ],
+    key=['n_cols']
+)
 @triton.jit
 def element_mul(
     X_ptr,
@@ -170,8 +188,6 @@ class LigerCrossEntropyFunction(torch.autograd.Function):
         BT, V = _input.shape
         n_rows = BT
 
-        BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
-
         # unreduced loss
         loss_1d = torch.zeros(n_rows, dtype=_input.dtype, device=_input.device)
 
@@ -194,10 +210,6 @@ class LigerCrossEntropyFunction(torch.autograd.Function):
             n_cols=V,
             n_non_ignore=n_non_ignore,
             ignore_index=ignore_index,
-            BLOCK_SIZE=BLOCK_SIZE,
-            # TODO: 32 seems to give the best performance
-            # Performance is quite sensitive to num_warps
-            num_warps=32,
         )
 
         loss = torch.sum(loss_1d) / n_non_ignore
@@ -230,15 +242,12 @@ class LigerCrossEntropyFunction(torch.autograd.Function):
         else:
             BT, V = _input.shape
             n_rows = BT
-            BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
 
             element_mul[(n_rows,)](
                 _input,
                 _input.stride(-2),
                 grad_output,
                 V,
-                BLOCK_SIZE=BLOCK_SIZE,
-                num_warps=32,
             )
 
         return (
