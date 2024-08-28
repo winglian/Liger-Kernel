@@ -42,7 +42,6 @@ class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
         # for ex: BT = 4096*4, V = 32000, H = 4096 ==> inc_factor = 8, chunk_size = 2048
         BT, H = _input.shape
         V = linear.shape[0]
-        BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
 
         inc_factor = triton.cdiv(V, H)  # (V + H - 1) // H
         chunk_size = triton.next_power_of_2(
@@ -91,8 +90,6 @@ class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
                 n_cols=V,
                 n_non_ignore=n_non_ignore,
                 ignore_index=ignore_index,
-                BLOCK_SIZE=BLOCK_SIZE,
-                num_warps=32,
             )
 
             # gradient of logits_chunk is computed in-place by the above triton kernel.
@@ -134,15 +131,12 @@ class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
             # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
             BT, H = grad_input.shape
             n_rows = BT
-            BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
 
             element_mul[(n_rows,)](
                 grad_input,
                 grad_input.stride(-2),
                 grad_output,
                 H,
-                BLOCK_SIZE=BLOCK_SIZE,
-                num_warps=32,
             )
 
             # handle grad_linear
@@ -154,8 +148,6 @@ class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
                 grad_linear.stride(-2),
                 grad_output,
                 H,
-                BLOCK_SIZE=BLOCK_SIZE,
-                num_warps=32,
             )
 
         return (grad_input, grad_linear, None, None)

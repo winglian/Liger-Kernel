@@ -146,7 +146,7 @@ def element_mul(
     X_stride (int): The stride of the input tensor.
     grad_output_ptr: Pointer to the gradient output value.
     n_cols (int): The number of columns in the input tensor.
-    BLOCK_SIZE (int): The block size for Triton operations.
+    BLOCK_SIZE_EM (int): The block size for Triton operations.
     """
 
     # Get the program ID and convert it to int64 to avoid overflow
