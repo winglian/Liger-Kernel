@@ -122,10 +122,10 @@ MAX_FUSED_SIZE = 65536 // 2  # the best size we found by manually tuning
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 4096}, num_warps=[8, 16, 32, 64]),
-        triton.Config({'BLOCK_SIZE': 8192}, num_warps=[8, 16, 32, 64]),
-        triton.Config({'BLOCK_SIZE': 16384}, num_warps=[8, 16, 32, 64]),
-        triton.Config({'BLOCK_SIZE': 32768}, num_warps=[8, 16, 32, 64]),
+        triton.Config({'BLOCK_SIZE_EM': 4096}, num_warps=[8, 16, 32, 64]),
+        triton.Config({'BLOCK_SIZE_EM': 8192}, num_warps=[8, 16, 32, 64]),
+        triton.Config({'BLOCK_SIZE_EM': 16384}, num_warps=[8, 16, 32, 64]),
+        triton.Config({'BLOCK_SIZE_EM': 32768}, num_warps=[8, 16, 32, 64]),
     ],
     key=['n_cols']
 )
@@ -135,7 +135,7 @@ def element_mul(
     X_stride,
     grad_output_ptr,
     n_cols,
-    BLOCK_SIZE: tl.constexpr,
+    BLOCK_SIZE_EM: tl.constexpr,
 ):
     """
     This function multiplies each element of the tensor pointed by X_ptr with the value pointed by grad_output_ptr.
@@ -159,8 +159,8 @@ def element_mul(
     grad_output = tl.load(grad_output_ptr)
 
     # Perform the element-wise multiplication
-    for i in range(0, n_cols, BLOCK_SIZE):
-        X_offsets = i + tl.arange(0, BLOCK_SIZE)
+    for i in range(0, n_cols, BLOCK_SIZE_EM):
+        X_offsets = i + tl.arange(0, BLOCK_SIZE_EM)
         X_block = tl.load(X_ptr + X_offsets, mask=X_offsets < n_cols)
         tl.store(X_ptr + X_offsets, X_block * grad_output, mask=X_offsets < n_cols)
 
