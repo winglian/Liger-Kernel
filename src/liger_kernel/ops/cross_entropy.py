@@ -6,9 +6,8 @@ import triton.language as tl
 def get_configs():
     configs = []
     for block_size in [4096, 8192, 16384, 32768]:
-        for num_warps in [8, 16, 32, 64]:
-            if num_warps <= block_size // 32:  # Ensure num_warps doesn't exceed maximum allowed
-                configs.append(triton.Config({'BLOCK_SIZE': block_size}, num_warps=num_warps))
+        for num_warps in [8, 16, 32]:
+            configs.append(triton.Config({'BLOCK_SIZE': block_size}, num_warps=num_warps))
     return configs
 
 @triton.autotune(
