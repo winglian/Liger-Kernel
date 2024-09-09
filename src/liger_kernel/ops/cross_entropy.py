@@ -65,8 +65,8 @@ def liger_cross_entropy_kernel(
     # 3. [Online softmax] first pass: find max + sum
     m = float("-inf")  # m is the max value. use the notation from the paper
     d = 0.0  # d is the sum. use the notation from the paper
-    ori_X_y = tl.load(
-        X_ptr + y
+    ori_X_y = tl.load(X_ptr + y).cast(
+        tl.float32
     )  # we need to store the original value of X_y for the loss calculation
 
     # Label smoothing is a general case of normal cross entropy
@@ -77,8 +77,11 @@ def liger_cross_entropy_kernel(
     for i in range(0, n_cols, BLOCK_SIZE):
         X_offsets = i + tl.arange(0, BLOCK_SIZE)
         X_block = tl.load(
-            X_ptr + X_offsets, mask=X_offsets < n_cols, other=float("-inf")
-        )
+            X_ptr + X_offsets,
+            mask=X_offsets < n_cols,
+            other=float("-inf"),
+            # Ensure float32 precision for softmax calculation
+        ).cast(tl.float32)
         block_max = tl.max(X_block)
         if label_smoothing > 0:
             # scale X beforehand to avoid overflow
@@ -108,7 +111,7 @@ def liger_cross_entropy_kernel(
         X_offsets = i + tl.arange(0, BLOCK_SIZE)
         X_block = tl.load(
             X_ptr + X_offsets, mask=X_offsets < n_cols, other=float("-inf")
-        )
+        ).cast(tl.float32)
         if reduction == "mean":
             X_block = (tl.exp(X_block - m) / d - eps) / (n_non_ignore)
         else:
@@ -145,7 +148,7 @@ def liger_cross_entropy_kernel(
         loss = loss / n_non_ignore
 
     # 6. Specially handle the i==y case where `dx_y = (softmax(x_y) - (1 - label_smoothing) / N`
-    X_y = tl.load(X_ptr + y)
+    X_y = tl.load(X_ptr + y).cast(tl.float32)
     if reduction == "mean":
         X_y += -(1 - label_smoothing) / (n_non_ignore)
     else:
