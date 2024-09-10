@@ -4,9 +4,12 @@ from functools import partial
 
 from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
 from liger_kernel.transformers.geglu import LigerGEGLUMLP
+from liger_kernel.transformers.layer_norm import LigerLayerNorm
 from liger_kernel.transformers.model.gemma import lce_forward as gemma_lce_forward
+from liger_kernel.transformers.model.jamba import lce_forward as jamba_lce_forward
 from liger_kernel.transformers.model.llama import lce_forward as llama_lce_forward
 from liger_kernel.transformers.model.mistral import lce_forward as mistral_lce_forward
+from liger_kernel.transformers.model.mixtral import lce_forward as mixtral_lce_forward
 from liger_kernel.transformers.model.phi3 import lce_forward as phi3_lce_forward
 from liger_kernel.transformers.model.qwen2 import lce_forward as qwen2_lce_forward
 from liger_kernel.transformers.rms_norm import LigerRMSNorm
@@ -100,7 +103,8 @@ def apply_liger_kernel_to_mistral(
 
 def apply_liger_kernel_to_mixtral(
     rope: bool = True,
-    cross_entropy: bool = True,
+    cross_entropy: bool = False,
+    fused_linear_cross_entropy: bool = True,
     rms_norm: bool = True,
     swiglu: bool = True,
 ) -> None:
@@ -109,10 +113,18 @@ def apply_liger_kernel_to_mixtral(
 
     Args:
         rope (bool): Whether to apply Liger's rotary position embedding. Default is True.
-        cross_entropy (bool): Whether to apply Liger's cross entropy loss. Default is True.
+        cross_entropy (bool): Whether to apply Liger's cross entropy loss. Default is False.
+        fused_linear_cross_entropy (bool):
+            Whether to apply Liger's fused linear cross entropy loss. Default is True.
+            `cross_entropy` and `fused_linear_cross_entropy` cannot both be True.
+            If `fused_linear_cross_entropy` is True, the logits will not be materialized but more memory efficient.
         rms_norm (bool): Whether to apply Liger's RMSNorm. Default is True.
         swiglu (bool): Whether to apply Liger's SwiGLU MLP. Default is True.
     """
+
+    assert not (
+        cross_entropy and fused_linear_cross_entropy
+    ), "cross_entropy and fused_linear_cross_entropy cannot both be True."
 
     from transformers.models.mixtral import modeling_mixtral
 
@@ -122,13 +134,15 @@ def apply_liger_kernel_to_mixtral(
         modeling_mixtral.MixtralRMSNorm = LigerRMSNorm
     if cross_entropy:
         modeling_mixtral.CrossEntropyLoss = LigerCrossEntropyLoss
+    if fused_linear_cross_entropy:
+        modeling_mixtral.MixtralForCausalLM.forward = mixtral_lce_forward
     if swiglu:
         modeling_mixtral.MixtralBlockSparseTop2MLP = LigerBlockSparseTop2MLP
 
 
 def apply_liger_kernel_to_gemma(
     rope: bool = True,
-    cross_entropy: bool = True,
+    cross_entropy: bool = False,
     fused_linear_cross_entropy: bool = True,
     rms_norm: bool = True,
     geglu: bool = True,
@@ -153,7 +167,9 @@ def apply_liger_kernel_to_gemma(
         modeling_gemma.apply_rotary_pos_emb = liger_rotary_pos_emb
     if rms_norm:
         # https://github.com/huggingface/transformers/blob/v4.44.2/src/transformers/models/gemma/modeling_gemma.py#L109
-        modeling_gemma.GemmaRMSNorm = partial(LigerRMSNorm, offset=1.0, init_fn="zeros")
+        modeling_gemma.GemmaRMSNorm = partial(
+            LigerRMSNorm, offset=1.0, init_fn="zeros", casting_mode="gemma"
+        )
     if cross_entropy:
         modeling_gemma.CrossEntropyLoss = LigerCrossEntropyLoss
     if geglu:
@@ -231,6 +247,54 @@ def apply_liger_kernel_to_qwen2(
         modeling_qwen2.Qwen2MLP = LigerSwiGLUMLP
 
 
+def apply_liger_kernel_to_qwen2_vl(
+    cross_entropy: bool = False,
+    fused_linear_cross_entropy: bool = True,
+    rms_norm: bool = True,
+    layer_norm: bool = True,
+    swiglu: bool = True,
+) -> None:
+    """
+    Apply Liger kernels to replace original implementation in HuggingFace Qwen2-VL models.
+    NOTE: Qwen2-VL is not available in transformers<=4.44.2
+
+    Args:
+        cross_entropy (bool): Whether to apply Liger's cross entropy loss. Default is False.
+        fused_linear_cross_entropy (bool):
+            Whether to apply Liger's fused linear cross entropy loss. Default is True.
+            `cross_entropy` and `fused_linear_cross_entropy` cannot both be True.
+            If `fused_linear_cross_entropy` is True, the logits will not be materialized but more memory efficient.
+        rms_norm (bool): Whether to apply Liger's RMSNorm. Default is True.
+        layer_norm (bool): Whether to apply Liger's LayerNorm. Default is True.
+        swiglu (bool): Whether to apply Liger's SwiGLU MLP. Default is True.
+    """
+    assert not (
+        cross_entropy and fused_linear_cross_entropy
+    ), "cross_entropy and fused_linear_cross_entropy cannot both be True."
+
+    from transformers.models.qwen2_vl import modeling_qwen2_vl
+
+    from liger_kernel.transformers.model.qwen2_vl import (
+        lce_forward as qwen2_vl_lce_forward,
+    )
+
+    # TODO: Support Qwen2-VL's multimodal RoPE implementation
+
+    if rms_norm:
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py#L439
+        modeling_qwen2_vl.Qwen2RMSNorm = partial(
+            LigerRMSNorm, init_fn="ones", casting_mode="gemma"
+        )
+    if layer_norm:
+        modeling_qwen2_vl.LayerNorm = LigerLayerNorm
+    if cross_entropy:
+        modeling_qwen2_vl.CrossEntropyLoss = LigerCrossEntropyLoss
+    if fused_linear_cross_entropy:
+        modeling_qwen2_vl.Qwen2VLForConditionalGeneration.forward = qwen2_vl_lce_forward
+    if swiglu:
+        modeling_qwen2_vl.Qwen2MLP = LigerSwiGLUMLP
+
+
 def apply_liger_kernel_to_phi3(
     rope: bool = True,
     cross_entropy: bool = False,
@@ -269,6 +333,43 @@ def apply_liger_kernel_to_phi3(
         modeling_phi3.Phi3ForCausalLM.forward = phi3_lce_forward
 
 
+def apply_liger_kernel_to_jamba(
+    cross_entropy: bool = False,
+    fused_linear_cross_entropy: bool = True,
+    rms_norm: bool = True,
+    swiglu: bool = True,
+) -> None:
+    """
+    Apply Liger kernels to replace original implementation in HuggingFace Jamba models
+    to make GPU go burrr.
+
+    # Note: Jamba model does not use rotary position embedding(RoPE).
+
+    Args:
+        cross_entropy (bool): Whether to apply Liger's cross entropy loss. Default is False.
+        fused_linear_cross_entropy (bool):
+            Whether to apply Liger's fused lienar cross entropy loss. Default is True.
+            `cross_entropy` and `fused_linear_cross_entropy` cannot both be True.
+            If `fused_linear_cross_entropy` is True, the logits will not be materialized but more memory efficient.
+        rms_norm (bool): Whether to apply Liger's RMSNorm. Default is True.
+        geglu (bool): Whether to apply Liger's GeGLU MLP. Default is True.
+    """
+    assert not (
+        cross_entropy and fused_linear_cross_entropy
+    ), "cross_entropy and fused_linear_cross_entropy cannot both be True."
+
+    from transformers.models.jamba import modeling_jamba
+
+    if rms_norm:
+        modeling_jamba.JambaRMSNorm = LigerRMSNorm
+    if cross_entropy:
+        modeling_jamba.CrossEntropyLoss = LigerCrossEntropyLoss
+    if swiglu:
+        modeling_jamba.JambaMLP = LigerSwiGLUMLP
+    if fused_linear_cross_entropy:
+        modeling_jamba.JambaForCausalLM.forward = jamba_lce_forward
+
+
 # Model type corresponds to the keys defined in transformers/models/auto/modeling_auto.py
 MODEL_TYPE_TO_APPLY_LIGER_FN = {
     "gemma": apply_liger_kernel_to_gemma,
@@ -277,7 +378,9 @@ MODEL_TYPE_TO_APPLY_LIGER_FN = {
     "mistral": apply_liger_kernel_to_mistral,
     "mixtral": apply_liger_kernel_to_mixtral,
     "qwen2": apply_liger_kernel_to_qwen2,
+    "qwen2_vl": apply_liger_kernel_to_qwen2_vl,
     "phi3": apply_liger_kernel_to_phi3,
+    "jamba": apply_liger_kernel_to_jamba,
 }
 
 

@@ -1,10 +1,12 @@
 import functools
+import os
 from test.utils import (
     DEFAULT_DATASET_PATH,
     MiniModelConfig,
     assert_verbose_allclose,
     set_seed,
     simple_collate_fn,
+    supports_bfloat16,
 )
 
 import pytest
@@ -13,6 +15,7 @@ from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from transformers.models.gemma import GemmaConfig, GemmaForCausalLM
 from transformers.models.gemma2 import Gemma2Config, Gemma2ForCausalLM
+from transformers.models.jamba import JambaConfig, JambaForCausalLM
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 from transformers.models.mistral import MistralConfig, MistralForCausalLM
 from transformers.models.mixtral import MixtralConfig, MixtralForCausalLM
@@ -22,12 +25,23 @@ from transformers.models.qwen2 import Qwen2Config, Qwen2ForCausalLM
 from liger_kernel.transformers import (
     apply_liger_kernel_to_gemma,
     apply_liger_kernel_to_gemma2,
+    apply_liger_kernel_to_jamba,
     apply_liger_kernel_to_llama,
     apply_liger_kernel_to_mistral,
     apply_liger_kernel_to_mixtral,
     apply_liger_kernel_to_phi3,
     apply_liger_kernel_to_qwen2,
 )
+
+torch.use_deterministic_algorithms(True)
+
+#  Only setting torch.use_deterministic_algorithms(True) throws the following error:
+#  RuntimeError: Deterministic behavior was enabled with either `torch.use_deterministic_algorithms(True)` or `at::Context::setDeterministicAlgorithms(true)`,
+#  but this operation is not deterministic because it uses CuBLAS and you have CUDA >= 10.2. To enable deterministic behavior in this case, you must set an
+#  environment variable before running your PyTorch application: CUBLAS_WORKSPACE_CONFIG=:4096:8 or CUBLAS_WORKSPACE_CONFIG=:16:8. For more information,
+#  go to https://docs.nvidia.com/cuda/cublas/index.html#results-reproducibility
+
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 MINI_MODEL_SETUPS = {
     "mini_llama3": MiniModelConfig(
@@ -267,6 +281,31 @@ MINI_MODEL_SETUPS = {
             attn_implementation="eager",
         ),
     ),
+    "mini_jamba": MiniModelConfig(
+        liger_kernel_patch_func=functools.partial(
+            apply_liger_kernel_to_jamba, fused_linear_cross_entropy=False
+        ),
+        model_class=JambaForCausalLM,
+        mini_model_config=JambaConfig(
+            attention_dropout=0.0,
+            num_experts_per_tok=1,
+            num_experts=2,
+            bos_token_id=1,
+            eos_token_id=2,  # 32000
+            hidden_act="silu",
+            hidden_size=1024,  # 3072
+            initializer_range=0.02,
+            intermediate_size=2048,  # 8192
+            max_position_embeddings=32768,
+            num_attention_heads=8,  # 32
+            num_hidden_layers=4,  # 32
+            rms_norm_eps=1e-5,
+            sliding_window=None,
+            tie_word_embeddings=False,
+            use_cache=True,
+            vocab_size=32064,
+        ),
+    ),
 }
 
 
@@ -304,6 +343,8 @@ def run_mini_model(
             kwargs["geglu"] = True
         else:
             kwargs["swiglu"] = True
+        if model_name == "mini_jamba":
+            del kwargs["rope"]
         MINI_MODEL_SETUPS[model_name].liger_kernel_patch_func(**kwargs)
 
     model = create_model(model_name).to(dtype).to("cuda")
@@ -316,9 +357,9 @@ def run_mini_model(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
     loss_list = []
-
     for i in range(num_steps):
         batch = next(loader_iter).to(model.device)
+        optimizer.zero_grad()
         output = model(**batch)
         output.loss.backward()
         optimizer.step()
@@ -331,25 +372,125 @@ def run_mini_model(
 @pytest.mark.parametrize(
     "model_name, num_steps, lr, dtype, loss_atol, loss_rtol, logits_atol, logits_rtol, param_atol, param_rtol",
     [
-        # Gemma 1.1 and 2 has more tolerance because currently, the kernel is not a perfect match (casts are not done the same way)
-        ("mini_gemma1", 32, 1e-4, torch.float32, 1e-6, 1e-4, 5e-3, 1e-5, 5e-3, 1e-5),
-        ("mini_gemma1", 32, 1e-4, torch.bfloat16, 1e-2, 1e-4, 2e-1, 1e-5, 1e-2, 1e-5),
-        ("mini_gemma1.1", 32, 1e-4, torch.float32, 1e-6, 1e-4, 5e-3, 1e-5, 5e-3, 1e-5),
-        ("mini_gemma1.1", 32, 1e-4, torch.bfloat16, 1e-2, 1e-4, 2e-1, 1e-5, 1e-2, 1e-5),
-        ("mini_gemma2", 32, 1e-4, torch.float32, 1e-8, 1e-4, 5e-3, 1e-5, 5e-3, 1e-5),
-        ("mini_gemma2", 32, 1e-4, torch.bfloat16, 1e-2, 1e-4, 2e-1, 1e-5, 1e-2, 1e-5),
-        ("mini_llama3", 32, 1e-4, torch.float32, 1e-8, 1e-5, 1e-4, 1e-5, 2e-3, 1e-5),
-        ("mini_llama3", 32, 1e-4, torch.bfloat16, 1e-8, 1e-5, 1e-1, 1e-5, 1e-2, 1e-5),
+        # Gemma 1 has more tolerance because currently, the kernel is not a perfect match (casts are not done the same way)
+        ("mini_gemma1", 32, 1e-4, torch.float32, 1e-8, 6e-4, 5e-3, 1e-5, 5e-3, 1e-5),
+        pytest.param(
+            "mini_gemma1",
+            32,
+            1e-4,
+            torch.bfloat16,
+            1e-8,
+            1e-5,
+            1e-2,
+            1e-5,
+            1e-2,
+            1e-5,
+            marks=pytest.mark.skipif(
+                not supports_bfloat16(), reason="bfloat16 not supported on this GPU"
+            ),
+        ),
+        ("mini_gemma1.1", 32, 1e-4, torch.float32, 1e-8, 1e-5, 5e-3, 1e-5, 5e-3, 1e-5),
+        pytest.param(
+            "mini_gemma1.1",
+            32,
+            1e-4,
+            torch.bfloat16,
+            1e-8,
+            1e-5,
+            1e-2,
+            1e-5,
+            1e-2,
+            1e-5,
+            marks=pytest.mark.skipif(
+                not supports_bfloat16(), reason="bfloat16 not supported on this GPU"
+            ),
+        ),
+        ("mini_gemma2", 32, 1e-4, torch.float32, 1e-8, 1e-5, 5e-3, 1e-5, 5e-3, 1e-5),
+        pytest.param(
+            "mini_gemma2",
+            32,
+            1e-4,
+            torch.bfloat16,
+            1e-8,
+            1e-5,
+            1e-2,
+            1e-5,
+            1e-2,
+            1e-5,
+            marks=pytest.mark.skipif(
+                not supports_bfloat16(), reason="bfloat16 not supported on this GPU"
+            ),
+        ),
+        ("mini_llama3", 32, 1e-4, torch.float32, 1e-8, 1e-5, 5e-3, 1e-5, 5e-3, 1e-5),
+        pytest.param(
+            "mini_llama3",
+            32,
+            1e-4,
+            torch.bfloat16,
+            1e-8,
+            1e-5,
+            1e-2,
+            1e-5,
+            1e-2,
+            1e-5,
+            marks=pytest.mark.skipif(
+                not supports_bfloat16(), reason="bfloat16 not supported on this GPU"
+            ),
+        ),
         # TODO: torch 2.5.0 nightly breaks mixtral test, but torch 2.3.0 works fine
         # TODO: mixtral MoE structure makes the convergence flaky so disable the test for now. It needs high tol to pass.
         # ("mini_mixtral", 32, 1e-4, torch.float32, 1e-8, 1e-4, 5e-3, 1e-5, 8e-3, 1e-5),
         # ("mini_mixtral", 32, 1e-4, torch.bfloat16, 1e-8, 1e-5, 2.0, 1e-5, 1e-2, 1e-5),
         ("mini_mistral", 32, 1e-4, torch.float32, 1e-8, 1e-5, 5e-3, 1e-5, 5e-3, 1e-5),
-        ("mini_mistral", 32, 1e-4, torch.bfloat16, 1e-8, 1e-5, 1e-1, 1e-5, 1e-2, 1e-5),
+        pytest.param(
+            "mini_mistral",
+            32,
+            1e-4,
+            torch.bfloat16,
+            1e-8,
+            1e-5,
+            1e-2,
+            1e-5,
+            1e-2,
+            1e-5,
+            marks=pytest.mark.skipif(
+                not supports_bfloat16(), reason="bfloat16 not supported on this GPU"
+            ),
+        ),
         ("mini_qwen2", 32, 1e-4, torch.float32, 1e-8, 1e-5, 5e-3, 1e-5, 5e-3, 1e-5),
-        ("mini_qwen2", 32, 1e-4, torch.bfloat16, 1e-8, 1e-5, 1e-1, 1e-5, 1e-2, 1e-5),
+        pytest.param(
+            "mini_qwen2",
+            32,
+            1e-4,
+            torch.bfloat16,
+            1e-8,
+            1e-5,
+            1e-2,
+            1e-5,
+            1e-2,
+            1e-5,
+            marks=pytest.mark.skipif(
+                not supports_bfloat16(), reason="bfloat16 not supported on this GPU"
+            ),
+        ),
         ("mini_phi3", 32, 1e-4, torch.float32, 1e-8, 1e-5, 5e-3, 1e-5, 5e-3, 1e-5),
-        ("mini_phi3", 32, 1e-4, torch.bfloat16, 1e-8, 1e-5, 1e-1, 1e-5, 1e-2, 1e-5),
+        pytest.param(
+            "mini_phi3",
+            32,
+            1e-4,
+            torch.bfloat16,
+            1e-8,
+            1e-5,
+            1e-2,
+            1e-5,
+            1e-2,
+            1e-5,
+            marks=pytest.mark.skipif(
+                not supports_bfloat16(), reason="bfloat16 not supported on this GPU"
+            ),
+        ),
+        # To run this test, you need to first run `pip install . '[test]'`
+        # ("mini_jamba", 32, 1e-4, torch.float32, 1e-8, 1e-5, 5e-3, 1e-5, 5e-3, 1e-5),
     ],
 )
 def test_mini_model(
